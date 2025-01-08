@@ -5,13 +5,14 @@ from torch import nn
 
 
 # Transformer encoder layer
-class EncoderLayer(nn.module):
+class EncoderLayer(nn.Module):
 
     def __init__(self,
                  q_size,
                  k_size,
                  v_size,
                  hidden_num,
+                 norm_shape,
                  ffn_input_num,
                  ffn_hidden_num,
                  ffn_output_num,
@@ -24,13 +25,13 @@ class EncoderLayer(nn.module):
                                                         hidden_num,
                                                         head_num,
                                                         dropout=0.5)
-        self.add_norm_1 = model_utils.AddNorm(drop_out)
+        self.add_norm_1 = model_utils.AddNorm(norm_shape, drop_out)
         self.positionwise_ffn = model_utils.PositionwiseFFN(
             ffn_input_num, ffn_hidden_num, ffn_output_num)
-        self.add_norm_2 = model_utils.AddNorm(drop_out)
+        self.add_norm_2 = model_utils.AddNorm(norm_shape, drop_out)
 
     def forward(self, src_input, src_valid_lens):
-        # src_input.shape: (batch_size, num_steps, src_vocab_size)
+        # src_input.shape: (batch_size, num_steps, hidden_num)
         # res.shape: (batch_size, num_steps, hidden_num)
         Y = self.attention(src_input, src_input, src_input, src_valid_lens)
         X = self.add_norm_1(src_input, Y)
@@ -48,6 +49,7 @@ class Encoder(nn.Module):
                  k_size,
                  v_size,
                  hidden_num,
+                 norm_shape,
                  ffn_input_num,
                  ffn_hidden_num,
                  ffn_output_num,
@@ -56,21 +58,21 @@ class Encoder(nn.Module):
                  dropout=0.5) -> None:
         super(Encoder, self).__init__()
         self.embedding = nn.Embedding(src_vocab_size, hidden_num)
-        self.positional_encoding = model_utils.PositionalEncoding(dropout)
+        self.positional_encoding = model_utils.PositionalEncoding(hidden_num)
         self.hidden_num = hidden_num
         self.enc_layers = nn.Sequential()
         self.attention_weight = [None for i in range(layer_num)]
         for idx in range(layer_num):
             self.enc_layers.add_module(
                 "block" + str(idx),
-                EncoderLayer(q_size, k_size, v_size, hidden_num, ffn_input_num,
-                             ffn_hidden_num, ffn_output_num, head_num,
-                             dropout))
+                EncoderLayer(q_size, k_size, v_size, hidden_num, norm_shape,
+                             ffn_input_num, ffn_hidden_num, ffn_output_num,
+                             head_num, dropout))
 
     def forward(self, src_input, src_valid_lens):
         X = self.embedding(src_input)
         X = self.positional_encoding(X * math.sqrt(self.hidden_num))
-        for idx, layer in self.enc_layers:
+        for idx, layer in enumerate(self.enc_layers):
             X = layer(X, src_valid_lens)
             self.attention_weight[
                 idx] = layer.attention.attention.attention_weight
@@ -78,13 +80,14 @@ class Encoder(nn.Module):
 
 
 # Transformer decoder layer
-class DecoderLayer(nn.module):
+class DecoderLayer(nn.Module):
 
     def __init__(self,
                  q_size,
                  k_size,
                  v_size,
                  hidden_num,
+                 norm_shape,
                  ffn_input_num,
                  ffn_hidden_num,
                  ffn_output_num,
@@ -95,20 +98,27 @@ class DecoderLayer(nn.module):
         self.idx = idx
         self.attention_1 = model_utils.MultiHeadAttention(
             q_size, k_size, v_size, hidden_num, head_num, dropout)
-        self.add_norm_1 = model_utils.AddNorm(dropout)
+        self.add_norm_1 = model_utils.AddNorm(norm_shape, dropout)
         self.attention_2 = model_utils.MultiHeadAttention(
             q_size, k_size, v_size, hidden_num, head_num, dropout)
-        self.add_norm_2 = model_utils.AddNorm(dropout)
+        self.add_norm_2 = model_utils.AddNorm(norm_shape, dropout)
         self.positionwise_ffn = model_utils.PositionwiseFFN(
             ffn_input_num, ffn_hidden_num, ffn_output_num)
-        self.add_norm_3 = model_utils.AddNorm(dropout)
+        self.add_norm_3 = model_utils.AddNorm(norm_shape, dropout)
 
-    def forward(self, tgt_input, enc_output, src_valid_lens, tgt_valid_lens):
-        # output: (batch_size, num_steps, hidden_num)
+    def forward(self, tgt_input, enc_output, src_valid_lens):
+        # init tgt valid lens (batch_size, num_steps)
+        tgt_valid_lens = None
+        if self.training:
+            tgt_valid_lens = torch.arange(1,
+                                          tgt_input.shape[1] + 1,
+                                          device=tgt_input.device).repeat(
+                                              tgt_input.shape[0], 1)
         Y = self.attention_1(tgt_input, tgt_input, tgt_input, tgt_valid_lens)
         X = self.add_norm_1(tgt_input, Y)
         Y = self.attention_2(X, enc_output, enc_output, src_valid_lens)
         X = self.add_norm_2(X, Y)
+        #  (batch_size, num_steps, hidden_num)
         output = self.add_norm_3(X, self.positionwise_ffn(X))
         return output
 
@@ -122,6 +132,7 @@ class Decoder(nn.Module):
                  k_size,
                  v_size,
                  hidden_num,
+                 norm_shape,
                  ffn_input_num,
                  ffn_hidden_num,
                  ffn_output_num,
@@ -160,19 +171,68 @@ class Decoder(nn.Module):
 # Transformer model
 class Transformer(nn.Module):
 
-    def __init__(self, hidden_num, src_vocab_size, tgt_vocan_size) -> None:
+    def __init__(self,
+                 src_vocab_size,
+                 tgt_vocab_size,
+                 q_size,
+                 k_size,
+                 v_size,
+                 hidden_num,
+                 norm_shape,
+                 ffn_input_num,
+                 ffn_hidden_num,
+                 ffn_output_num,
+                 head_num,
+                 enc_layer_num=6,
+                 dec_layer_num=6,
+                 dropout=0.5) -> None:
         super(Transformer, self).__init__()
-        self.encoder = Encoder()
-        self.decoder = Decoder()
-        self.fc = nn.Linear(hidden_num, tgt_vocan_size)
+        self.encoder = Encoder(src_vocab_size, q_size, k_size, v_size,
+                               hidden_num, norm_shape, ffn_input_num,
+                               ffn_hidden_num, ffn_output_num, head_num,
+                               enc_layer_num, dropout)
+        self.decoder = Decoder(src_vocab_size, tgt_vocab_size, q_size, k_size,
+                               v_size, hidden_num, norm_shape, ffn_input_num,
+                               ffn_hidden_num, ffn_output_num, head_num,
+                               enc_layer_num, dec_layer_num, dropout)
+        self.fc = nn.Linear(hidden_num, tgt_vocab_size)
 
-    def forward(self, src, target, src_valid_lens, target_lens):
-        enc_output = self.encoder(src)  # (batch_size, num_steps, num_hiddens)
-        output = self.decoder(target, enc_output)
-        output = self.fc(output)
+    def forward(self, src_input, tgt_input, src_valid_lens, tgt_valid_lens):
+        enc_output = self.encoder(
+            src_input, src_valid_lens)  # (batch_size, num_steps, num_hiddens)
+        output = self.decoder(
+            tgt_input, enc_output, src_valid_lens,
+            tgt_valid_lens)  # (batch_size, num_steps, num_hiddens)
+        output = self.fc(output)  # (batch_size, num_steps, tgt_vocab_size)
         return output
 
 
 if __name__ == '__main__':
-    # basic unit test
-    pass
+    src_vocab_size = 200
+    hidden_num = 50
+    head_num = 5
+    layer_num = 6
+    dropout = 0.5
+    # test encoder layer
+    print('\ntesting encoder layer:')
+    src_input = torch.ones((5, 30, 50))
+    src_valid_lens = torch.tensor([5, 6, 7, 8, 9])
+    enc_layer = EncoderLayer(hidden_num, hidden_num, hidden_num, hidden_num,
+                             hidden_num, hidden_num, hidden_num, hidden_num)
+    enc_layer_output = enc_layer(src_input, src_valid_lens)
+    print('src_input:', src_input.shape)
+    print('enc layer output: ',
+          enc_layer_output.shape)  # (batch_size, num_steps, hidden_num)
+
+    # test encoder
+    print('\ntesting encoder:')
+    src_input = torch.ones((5, 30), dtype=torch.int)
+    valid_len = torch.tensor([5, 6, 7, 8, 9])
+    encoder = Encoder(src_vocab_size, hidden_num, hidden_num, hidden_num,
+                      hidden_num, hidden_num, hidden_num, hidden_num,
+                      hidden_num, head_num, layer_num, dropout)
+    enc_output = encoder(src_input, src_valid_lens)
+    print('src_input:', src_input.shape)
+    print('enc output:', enc_output.shape)
+
+    # test decoder layer

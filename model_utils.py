@@ -78,6 +78,7 @@ class MultiHeadAttention(nn.Module):
         self.Wv = nn.Linear(v_size, hidden_num)
         self.Wo = nn.Linear(hidden_num, hidden_num)
         self.head_num = head_num
+        self.hidden_num = hidden_num
         self.attention = DotProductAttention(dropout)
 
     def forward(self, queries, keys, values, valid_lens):
@@ -114,11 +115,11 @@ class MultiHeadAttention(nn.Module):
 # Add Norm
 class AddNorm(nn.Module):
 
-    def __init__(self, dropout_rate) -> None:
+    def __init__(self, norm_shape, dropout_rate) -> None:
         super(AddNorm, self).__init__()
         self.dropout = nn.Dropout(dropout_rate)
         # Normalization for each token in text sentence.
-        self.layer_norm = nn.LayerNorm()
+        self.layer_norm = nn.LayerNorm(norm_shape)
 
     def forward(self, X, Y):
         return self.layer_norm(X + self.dropout(Y))
