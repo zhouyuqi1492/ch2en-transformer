@@ -92,10 +92,8 @@ class DecoderLayer(nn.Module):
                  ffn_hidden_num,
                  ffn_output_num,
                  head_num,
-                 idx,
                  dropout=0.5) -> None:
         super(DecoderLayer, self).__init__()
-        self.idx = idx
         self.attention_1 = model_utils.MultiHeadAttention(
             q_size, k_size, v_size, hidden_num, head_num, dropout)
         self.add_norm_1 = model_utils.AddNorm(norm_shape, dropout)
@@ -143,23 +141,23 @@ class Decoder(nn.Module):
         self.layer_num = layer_num
         self.hidden_num = hidden_num
         self.embedding = nn.Embedding(tgt_vocab_size, self.hidden_num)
-        self.positional_encoding = model_utils.PositionalEncoding(dropout)
+        self.positional_encoding = model_utils.PositionalEncoding(hidden_num)
         self.dec_layers = nn.Sequential()
         for idx in range(self.layer_num):
             self.dec_layers.add_module(
                 "block" + str(idx),
-                DecoderLayer(q_size, k_size, v_size, hidden_num, ffn_input_num,
-                             ffn_hidden_num, ffn_output_num, head_num,
-                             dropout))
+                DecoderLayer(q_size, k_size, v_size, hidden_num, norm_shape,
+                             ffn_input_num, ffn_hidden_num, ffn_output_num,
+                             head_num, dropout))
         self.ffn = nn.Linear(ffn_output_num, tgt_vocab_size)
 
-    def forward(self, tgt_input, enc_output, src_valid_lens, tgt_valid_lens):
+    def forward(self, tgt_input, enc_output, src_valid_lens):
         X = self.embedding(tgt_input)
         X = self.positional_encoding(X * math.sqrt(self.hidden_num))
         # init because there are two attention layers in each decoder blocker.
         self.attention_weight = [[None, None] for i in range(self.layer_num)]
         for idx, layer in enumerate(self.dec_layers):
-            X = layer(X, enc_output, src_valid_lens, tgt_valid_lens)
+            X = layer(X, enc_output, src_valid_lens)
             self.attention_weight[idx][
                 0] = layer.attention_1.attention.attention_weight
             self.attention_weight[idx][
@@ -209,6 +207,7 @@ class Transformer(nn.Module):
 
 if __name__ == '__main__':
     src_vocab_size = 200
+    tgt_vocab_size = 400
     hidden_num = 50
     head_num = 5
     layer_num = 6
@@ -236,3 +235,23 @@ if __name__ == '__main__':
     print('enc output:', enc_output.shape)
 
     # test decoder layer
+    print('\ntesting decoder layer:')
+    tgt_input = torch.ones((5, 30, 50), dtype=torch.float32)
+    valid_len = torch.tensor([5, 6, 7, 8, 9])
+    decoder_layer = DecoderLayer(hidden_num, hidden_num, hidden_num,
+                                 hidden_num, hidden_num, hidden_num,
+                                 hidden_num, hidden_num, head_num, dropout)
+    dec_layer_output = decoder_layer(tgt_input, enc_output, src_valid_lens)
+    print('dec_input:', tgt_input.shape)
+    print('dec layer output:', dec_layer_output.shape)
+
+    # test decoder
+    print('\ntesting decoder:')
+    tgt_input = torch.ones((5, 40), dtype=torch.int)
+    valid_len = torch.tensor([5, 6, 7, 8, 9])
+    decoder = Decoder(tgt_vocab_size, hidden_num, hidden_num, hidden_num,
+                      hidden_num, hidden_num, hidden_num, hidden_num,
+                      hidden_num, head_num, layer_num, dropout)
+    enc_output = decoder(tgt_input, enc_output, src_valid_lens)
+    print('src_input:', tgt_input.shape)
+    print('enc output:', enc_output.shape)
