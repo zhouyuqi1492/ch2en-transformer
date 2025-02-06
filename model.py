@@ -189,19 +189,17 @@ class Transformer(nn.Module):
                                hidden_num, norm_shape, ffn_input_num,
                                ffn_hidden_num, ffn_output_num, head_num,
                                enc_layer_num, dropout)
-        self.decoder = Decoder(src_vocab_size, tgt_vocab_size, q_size, k_size,
-                               v_size, hidden_num, norm_shape, ffn_input_num,
+        self.decoder = Decoder(tgt_vocab_size, q_size, k_size, v_size,
+                               hidden_num, norm_shape, ffn_input_num,
                                ffn_hidden_num, ffn_output_num, head_num,
-                               enc_layer_num, dec_layer_num, dropout)
-        self.fc = nn.Linear(hidden_num, tgt_vocab_size)
+                               dec_layer_num, dropout)
 
-    def forward(self, src_input, tgt_input, src_valid_lens, tgt_valid_lens):
+    def forward(self, src_input, tgt_input, src_valid_lens):
         enc_output = self.encoder(
             src_input, src_valid_lens)  # (batch_size, num_steps, num_hiddens)
         output = self.decoder(
-            tgt_input, enc_output, src_valid_lens,
-            tgt_valid_lens)  # (batch_size, num_steps, num_hiddens)
-        output = self.fc(output)  # (batch_size, num_steps, tgt_vocab_size)
+            tgt_input, enc_output,
+            src_valid_lens)  # (batch_size, num_steps, num_hiddens)
         return output
 
 

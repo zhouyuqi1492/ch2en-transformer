@@ -4,6 +4,8 @@ import pickle
 from tqdm import tqdm
 from collections import Counter
 from sklearn.model_selection import train_test_split
+import torch
+from torch.utils.data import Dataset
 
 data_path = 'data/news-commentary-v13-zh-en.txt'
 # reserved tokens
@@ -14,30 +16,91 @@ eos_token = '<eos>'
 reserved_tokens = [pad_token, ukn_token, bos_token, eos_token]
 
 
-class Vocab:
+class OneHotTokenizer:
     # Collecting vocabs for each language.
-    def __init__(self, counter, word2idx, idx2word) -> None:
+    def __init__(self, counter, word2idx, idx2word, is_for_ch) -> None:
         self.counter = counter
         self.word2idx = word2idx
         self.idx2word = idx2word
+        self.is_for_ch = is_for_ch
 
     def __len__(self):
         return len(self.word2idx)
 
-    def ConvertTextToIdx(self, sentence, word2idx):
-        return [
-            word2idx[word] if word in word2idx else word2idx[ukn_token]
-            for word in sentence
-        ]
+    def convert_word_to_idx(self, word):
+        if word in self.word2idx:
+            return self.word2idx[word]
+        return self.word2idx[ukn_token]
 
-    def ConvertIdx2Text(self, sentence):
+    def convert_idx_to_word(self, index):
+        return self.idx2word[index]
+
+    def encode(self, sentence, max_len):
+        sentence = sentence.replace('\n', '')
+        vocab_size = len(list(self.counter))
+        if self.is_for_ch:
+            words = list(jieba.cut(sentence))
+        else:
+            words = sentence.split(' ')
+        words = [bos_token] + words + [eos_token]
+        indices = [self.convert_word_to_idx(word) for word in words]
+        valid_len = min(len(indices), max_len)
+        if len(indices) > max_len:
+            indices = indices[:max_len -
+                              1] + [self.convert_word_to_idx(eos_token)]
+        elif len(indices) < max_len:
+            indices += [self.convert_word_to_idx(pad_token)
+                        ] * (max_len - len(indices))
+        # one_hot_tensor = torch.zeros(max_len, vocab_size, dtype=torch.long)
+        # one_hot_tensor[range(max_len), indices] = 1
+        indices_tensor = torch.tensor(indices, dtype=torch.long)
+        valid_len_tensor = torch.tensor(valid_len, dtype=torch.long)
+        return indices_tensor, valid_len_tensor
+
+    def decode(self, indices):
         words = []
-        for i in sentence:
-            word = self.idx2word[i]
+        for index in indices:
+            word = self.idx2word[index]
             if word == eos_token:
                 break
-            words.append(self.idx2word[i])
+            words.append(self.convert_idx_to_word(index))
         return ' '.join(words)
+
+
+class TranslationDataset(Dataset):
+
+    def __init__(self, src_data_file_path, src_tokenizer, tgt_data_file_path,
+                 tgt_tokenizer, max_len) -> None:
+        super(TranslationDataset, self).__init__()
+        # init sentences and tokenizer
+        self.src_sentences = None
+        with open(src_data_file_path, 'r') as rfile:
+            self.src_sentences = rfile.readlines()
+        self.tgt_sentences = None
+        with open(tgt_data_file_path, 'r') as rfile:
+            self.tgt_sentences = rfile.readlines()
+        self.src_tokenizer = src_tokenizer
+        self.tgt_tokenizer = tgt_tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.src_sentences)
+
+    def __getitem__(self, index):
+        # get sentences
+        src_sentence = self.src_sentences[index].replace('\n', '')
+        tgt_sentence = self.tgt_sentences[index].replace('\n', '')
+        # tokenizer processing
+        src_tensor, src_valid_len_tensor = self.src_tokenizer.encode(
+            src_sentence, self.max_len)
+        tgt_tensor, tgt_valid_len_tensor = self.tgt_tokenizer.encode(
+            tgt_sentence, self.max_len)
+        return {
+            'src': src_tensor,
+            'tgt': tgt_tensor,
+            'src_valid_len': src_valid_len_tensor,
+            'tgt_valid_len': tgt_valid_len_tensor
+        }
 
 
 # Get ch-en pair corpus.
@@ -62,9 +125,9 @@ def GetParallelCorpus():
     return source_sentences, target_sentences
 
 
-# TODO(Yukizh): Consider split numbers into single char.
-def BuildCHVocab(ch_dataset, min_freq, reserved_tokens):
-    print('Building Chinese vocabs...')
+# TODO(Yukizh): Build tokenizer in one function by using is_for_ch param.
+def BuildCHTokenizer(ch_dataset, min_freq, reserved_tokens):
+    print('Building Chinese tokenizer...')
     counter = Counter()
     word2idx, idx2word = {}, {}
     # Add reserved tokens.
@@ -74,7 +137,8 @@ def BuildCHVocab(ch_dataset, min_freq, reserved_tokens):
         idx2word[temp_idx] = token
     # Add from src copurs.
     for idx in tqdm(range(len(ch_dataset))):
-        seg_list = jieba.cut(ch_dataset[idx], cut_all=True)
+        line = ch_dataset[idx].replace('\n', '')
+        seg_list = jieba.cut(line, cut_all=True)
         counter.update(list(seg_list))
     for token in counter:
         if counter[token] < min_freq:
@@ -83,12 +147,12 @@ def BuildCHVocab(ch_dataset, min_freq, reserved_tokens):
         word2idx[token] = temp_idx
         idx2word[temp_idx] = token
     print('Vocab size: ', len(word2idx))
-    print('Building Chinese vocabs success!')
-    return Vocab(counter, word2idx, idx2word)
+    print('Building Chinese tokenizer success!')
+    return OneHotTokenizer(counter, word2idx, idx2word, is_for_ch=True)
 
 
-def BuildENVocab(en_dataset, min_freq, reserved_tokens):
-    print('Building English vocabs ...')
+def BuildENTokenizer(en_dataset, min_freq, reserved_tokens):
+    print('Building English tokenizer ...')
     counter = Counter()
     word2idx = {}
     idx2word = {}
@@ -109,11 +173,11 @@ def BuildENVocab(en_dataset, min_freq, reserved_tokens):
         word2idx[token] = temp_idx
         idx2word[temp_idx] = token
     print('Vocab size: ', len(word2idx))
-    print('Building English vocabs success!')
-    return Vocab(counter, word2idx, idx2word)
+    print('Building English tokenizer success!')
+    return OneHotTokenizer(counter, word2idx, idx2word, is_for_ch=False)
 
 
-def CalculateDatesetStatistics():
+def GetDatesetInfo():
     src_corpus, tgt_corpus = GetParallelCorpus()
     print('-----')
     print('Source data: ')
@@ -164,16 +228,16 @@ if __name__ == '__main__':
     src_corpus, tgt_corpus = GetParallelCorpus()
 
     # Build vocabs.
-    src_vocab = BuildCHVocab(src_corpus,
-                             min_freq=1,
-                             reserved_tokens=reserved_tokens)
-    tgt_vocab = BuildENVocab(tgt_corpus,
-                             min_freq=1,
-                             reserved_tokens=reserved_tokens)
-    with open('data/src_vocab.pkl', 'wb') as wfile:
-        pickle.dump(src_vocab, wfile)
-    with open('data/tgt_vocab.pkl', 'wb') as wfile:
-        pickle.dump(tgt_vocab, wfile)
+    src_tokenizer = BuildCHTokenizer(src_corpus,
+                                     min_freq=1,
+                                     reserved_tokens=reserved_tokens)
+    tgt_tokenizer = BuildENTokenizer(tgt_corpus,
+                                     min_freq=1,
+                                     reserved_tokens=reserved_tokens)
+    with open('data/src_tokenizer.pkl', 'wb') as wfile:
+        pickle.dump(src_tokenizer, wfile)
+    with open('data/tgt_tokenizer.pkl', 'wb') as wfile:
+        pickle.dump(tgt_tokenizer, wfile)
 
     # Split dataset.
     src_train, src_test, tgt_train, tgt_test = train_test_split(src_corpus,
